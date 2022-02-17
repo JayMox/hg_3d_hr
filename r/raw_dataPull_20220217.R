@@ -22,7 +22,7 @@ dat <- dive2 %>% janitor::clean_names() %>%
          #nb: max dep is a separate measurement than dive profiling (i.e., d1:9)
          matches('d\\d{1}\\b'), matches('t\\d{1}\\b'),
          pseg_idx #this is an idx for merging dive data & movement model
-         ) %>% 
+  ) %>% 
   mutate(pseg_fac = as.factor(paste(tag, as.factor(pseg_idx), sep = "."))) #create an easy key for merge w/ moveDat
 
 #add dist2shore & bathy sampler using custom fxns in dive_fxns
@@ -48,22 +48,8 @@ mov <- traj4 %>% janitor::clean_names() %>%
 dvdf <- dat %>% 
   merge(mov %>% select(pseg_fac, season, phase_movt, foray_idx3, d2s_m, dd_movtX, dd_movtY),
         by = "pseg_fac", all.x = T)
-save(dvdf, file = here('data', 'dive_df_feb22.RData'))
-dvdf %>% write_csv(here('data', 'dive_df_feb22.csv'))
-
-#make data long
-dvdf_long <- dvdf %>% 
-  select(season, pseg_fac, jday, tagday, foray_idx3, tag, pseg_idx, 
-         surf_dur, dive_dur, max_dep, percent_area, d2s_m, phase_movt,
-         matches('d\\d{1}\\b'), 
-         contains('date'), contains('lon'), contains('lat')) %>% 
-  gather(didx,  depth,
-         -c(season, pseg_fac, jday, tagday, foray_idx3, tag, pseg_idx, 
-            surf_dur, dive_dur, max_dep, percent_area, d2s_m, phase_movt,
-            contains('date'), contains('lon'), contains('lat')))
-
-dvdf %>% save(here('data', 'dive_long_feb22.Rdata'))
-dvdf %>% write_csv(here('data', 'dive_long_feb22.csv'))
+# save(dvdf, file = here('data', 'dive_df_feb22.RData'))
+# dvdf %>% write_csv(here('data', 'dive_df_feb22.csv'))
 
 
 
@@ -86,4 +72,4 @@ dvdf %>% write_csv(here('data', 'dive_long_feb22.csv'))
 #Then, another function (foray_endpts) is used to identify arrival and departure points at 
 #the coast.  Arrival and departure points are identified by scanning a pre-determined window
 #(default, 6 segments or 3 hrs) for minimum distances to the shoreline, so long as they do 
-  #not intersect with a polygon mask encompassing land & inshore/harbor waters.  
+#not intersect with a polygon mask encompassing land & inshore/harbor waters.  
