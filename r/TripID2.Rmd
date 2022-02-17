@@ -1,0 +1,219 @@
+---
+title: "TripID2"
+author: "Jerry Moxley"
+date: "July 24, 2015"
+output: html_document
+---
+
+This script reviews the same trip identification need, but using an updated function tripID2 (duplicated locs involved in coastal approaches of 2 forays can only be used int he first foray, more vectorized and efficient).  Duration, while still calculated in tripID2 fxn over just the offshore section, is also calculated over the entire foray movement.
+
+NOTA BENE!!!!!!!!!! THIS SCRIPT MUST BE RUN SEPARETLY FOR WARM/COLD SEASONS. IDX IS THEREFORE REPEATING ACROSS TWO SEASONS AND MUST BE ADJUSTED BY THIS CODE: 
+
+CURRENT TRAJ3 DATASET HAS BEEN ADJUSTED AND SAVED AS SUCH.  HOWEVER THIS SCRIPT DOES NOT PRODUCE THE EXACT SAME OUTPUT
+
+From previous TripID script:
+This script identifies and indexes trips away from the coast for further analysis at the trip scale using a custom function called tripID.  Trips are identified by consecutive points beyond a distance threshold (default = 2000m).  These consecutive points must be greater than some minimum duration (expected default for summer, 6 segments = 3 hrs; expected winter default, 48 segments = 24 hrs).  Then, another function (foray_endpts) is used to identify arrival and departure points at the coast.  Arrival and departure points are identified by scanning a pre-determined window (default, 6 segments or 3 hrs) for minimum distances to the shoreline, so long as they do not intersect with a polygon mask encompassing land & inshore/harbor waters.  
+
+```{r, echo = FALSE}
+#load data and prep workbench
+rm(list=ls(all=TRUE)) 
+Sys.setenv(TZ='GMT')
+
+library(adehabitatLT)
+library(lubridate)
+library(zoo)
+library(rgdal)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(rgeos)  #for gDistance()
+library(maptools)
+library(PBSmapping)
+library(ggmap)
+library(reshape2)
+library(reshape)
+library(RColorBrewer)
+#set working directory and read in data
+home_dir <- "/Volumes/HELLBENDY/Seals_GOM/analysis_movements"; clip = 28;
+#home_dir <- "/Volumes/Yoda/Users/mox/analysis_movements"; clip = 23;
+setwd(home_dir);
+
+#load in cleaned data
+load(paste(home_dir, "hg_traj.df2.RData", sep = "/"))
+#hg_traj.df <- filter(hg_traj.df, !(id == 646 & date > ymd("2014-03-01"))) #clip erroneous tail records for malfx tag
+#save(hg_traj.df, file = paste(home_dir, "hg_traj.df2.RData", sep = "/"))
+
+#source move fxns for shore_dist_sampler
+source(paste(home_dir,"move_fxns.R", sep = "/"))
+
+#sampling shoredistance can take a long time, load in data w/ shore distances already sampled (traj2)
+#traj2 <- shore_distances(hg_traj.df, coast = paste(substr(home_dir, 0, clip), "GIS/PhysicalOceanography/shoreline_UTM.shp", sep = "/"))
+#save(traj2, file = paste(home_dir, "traj2.RData", sep = "/"))
+load(paste(home_dir, "traj2.RData", sep = "/"))
+#traj2 <- filter(traj2, !(id == 646 & date > ymd("2014-03-01"))); save(traj2, file = paste(home_dir, "traj2.RData", sep = "/")) #remove tail end of malfx tag if not done already
+```
+
+You can also embed plots, for example:
+
+```{r, echo=TRUE}
+#set up month filters
+sumr_mos <- c(6,7,8,9,10)
+wint_mos <- c(11, 12, 1, 2, 3)
+
+#set projection (needs to be included into the fxn somewhere)
+utm.19 <- ("+proj=utm +zone=19 +north +datum=WGS84")
+
+#use tripid2 for better treatment of duplicates issue
+#test <- tripID2(traj2, dist_thresh = 2000, min_dur = 6, coast_win = 6)
+
+sumr_traj <- tripID2(filter(traj2, month(date) %in% sumr_mos), dist_thresh = 2000, min_dur = 6, coast_win = 6)
+wint_traj <- tripID2(filter(traj2, month(date) %in% wint_mos), dist_thresh=2000, min_dur = 12, coast_win = 6)
+full_traj <- tripID2(traj2, dist_thresh = 2000, min_dur = 6, coast_win = 6)
+```
+
+FollowUP!
+Still to do, error check tripID's via mapping and database inspection. CHECK
+Create a duration test for the entire offshore mov't as custom fxn
+Maps should include true GPS fixes.  
+Test function w/o removing specific indexed from foray_win
+Running TripID2 over whole dataset, harbor_test kicks back this error: 
+
+#Duration Conditions
+TripID2 calculates a duration for the offshore section via mindur, but in reality more concerned with the duration over the whole foray.  A new index is now built (forayidx3) based on the duration of the entire movement.  Then allocation of time to inbound, offshore, and outbound legs can be calculated and analyzed. 
+
+```{r, echo = TRUE}
+#combine two seasonal trajs as a list
+allyr_traj <- list(sumr_traj, wint_traj); names(allyr_traj) <- c("summer", "winter")
+
+#get summary statistics for the two seasons
+sum_segs <- ldply(allyr_traj, function(x){
+  require(reshape)
+  tmp<-ddply(x, .(id, foray_idx2, phase), summarize, n_segs = n())
+  tmp2 <- dcast(tmp, formula = id + foray_idx2 ~ phase, value.var = "n_segs")
+  return(data.frame(tmp2))
+})
+sum_segs <- rename(sum_segs, replace=c(".id" = "season"));   #mark seasonal id
+sum_segs <- select(select(filter(sum_segs, !is.na(foray_idx2)), -(NA.)), season, id, foray_idx2, outbound_shoulder, inbound_shoulder, outbound, offshore, inbound)
+
+#calculate total duration of outbound, offshore, and inbound mov't phases
+sum_segs <- ddply(sum_segs, .(id, foray_idx2, season), mutate, total = sum(outbound, offshore, inbound, na.rm=TRUE))  
+
+#for now, build duration test on basis of 6 segments in summer (with 4 offshore), 12 in winter (with 8 offshore)
+sumr_dur <- 6;
+wint_dur <- 12;
+sum_segs2 <- ddply(sum_segs, .(id, foray_idx2, season), function(x){
+  if(x$season == "summer"){
+    #if offshore section is greater than duration threshold, pass duration test; if not, test if outbound at least 2/3 of offshore behavior is greater
+    #particularly impt considerationw / winter movements, that have large offshore segments.. but may not record any locs in coastal approach (see 652 foray_idx2 7 in winter)
+    x$fulldur_test <- ifelse(x$offshore > sumr_dur, TRUE, ifelse((x$offshore >= (sumr_dur * 2/3) & sum(x$inbound, x$outbound) >= (sumr_dur * 1/3)), TRUE, FALSE))
+  }
+  if(x$season == "winter"){
+    x$fulldur_test <- ifelse(x$offshore > wint_dur, TRUE, ifelse((x$offshore >= (wint_dur * 2/3) & sum(x$inbound, x$outbound) >= (wint_dur * 1/3)), TRUE, FALSE))
+  }
+  return(x)
+})
+
+#new foray index
+sum_segs3 <- sum_segs2
+sum_segs3$foray_idx3 <- ifelse(sum_segs2$fulldur_test == TRUE, sum_segs2$foray_idx2, NA)
+#merge w/ original data
+sumr_traj$season <- factor("summer", levels = c("summer", "winter"))
+wint_traj$season <- factor("winter", levels = c("summer", "winter"))
+traj_idx3 <- merge(rbind.data.frame(sumr_traj, wint_traj), sum_segs3, by = c("id", "season", "foray_idx2"), all.x = TRUE)
+
+#re index winter forays
+traj_idx3 <- re_idx(traj_idx3, seas = "winter")
+#double check re index (this ddply should be all 1's, i.e., no duplicates; expect NA sections, i.e., not on a mov't)
+ddply(traj_idx3, .(id, foray_idx4), summarize, n = length(unique(season)), n_locs = n())
+ddply(traj_idx3, .(id, season), summarize, min3 = min(foray_idx3, na.rm = TRUE), max3 = max(foray_idx3, na.rm = TRUE), min4 = min(foray_idx4, na.rm=TRUE), max4 = max(foray_idx4, na.rm=TRUE))
+View(filter(traj_idx3, id == "658" & season == "winter"))
+
+save(traj_idx3, file = paste(home_dir, "traj3.RData", sep = "/"))
+#this should represent the complete dataset indexed (non-sequentially, w/ indices reindexed for summer & winter to not be repeating) by trips 
+
+#####USE THESE EDA PLOTS TO DETERMINE AN OPTIMIZED ASSUMPTION
+#plot summary of total durations & phases
+qplot(data = sum_segs, x = total, geom="histogram") + facet_wrap(~season, scales = "free")
+#difficult to see the distribution b/c long forays
+qplot(data = sum_segs, x = total, geom="histogram", binwidth = 1) + facet_wrap(~season) + scale_x_continuous(limits = c(0, 100))
+#6 looks like a reliable break for summertime
+
+qplot(data = melt(select(sum_segs, -inbound_shoulder, -outbound_shoulder), id.vars = c("id", "season", "foray_idx2"), variable.name = "phase"), x = value, geom = "histogram") + facet_grid(season~variable, scales = "free")
+
+#whats up with outbound/inbound sections w/ more than 6 points?? or offshore w/ no points
+filter(sum_segs, outbound > 6 | inbound > 6)
+filter(sum_segs, is.na(offshore))
+```
+
+#Plotting loop
+Plot these in ggmap to evaluate how well the algorithm works for winter data. 
+```{r, echo = FALSE}
+#plotting each foray + coastal_locs individually
+#ensure in correct order
+tmp <- arrange(wint_traj, id, date)
+#tmp <- filter(tmp, !(id == 358 & foray_idx2 == 1))
+
+#add decimal degrees for the dataset
+nad.83 <- "+proj=longlat +datum=NAD83"
+utm.19 <- ("+proj=utm +zone=19 +north +datum=WGS84")
+tmp2 <- cbind(tmp, spTransform(SpatialPoints(select(tmp, x, y), proj4string = CRS(utm.19)), CRS(nad.83)))
+colnames(tmp2)[c(ncol(tmp2)-1,ncol(tmp2))] <- c("x_dd", "y_dd")
+
+#mark bursts at scale of foray trips
+tmp2$burst <- factor(ifelse(!is.na(tmp2$foray_idx2), paste(tmp2$id, tmp2$foray_idx2, sep = "."), NA))
+
+#anchor color scale in
+colors = brewer.pal(length(unique(tmp2$phase)), "Set1")
+names(colors) <- levels(tmp2$phase)
+colScale <- scale_colour_manual(name = "phase", values = colors)
+#plot loop (must skip first foray b/c 358.1 is trouble)
+for(i in 2:length(unique(tmp2$burst))){
+  print(i)
+  #extract data
+  burst_tmp = unique(tmp2$burst)[i]
+  test <- filter(tmp2, burst == burst_tmp)
+  min_date = min(test$date)
+  
+  #plot map
+  map <- get_map(bbox(SpatialPoints(select(test, x_dd, y_dd))), zoom = calc_zoom(make_bbox(x_dd, y_dd, test))-1, source = "google")
+  ggmap(map) + geom_point(data = test, aes(x = x_dd, y = y_dd, colour = phase)) + labs(title = paste(burst_tmp, min_date, sep = "  ")) + guides(fill = TRUE) + colScale
+  ggsave(file = paste(home_dir, "/TripID2/winter/", unique(test$id), "/", burst_tmp, ".pdf", sep = ""), width = 7, height = 10)
+  
+  print(paste(burst_tmp, "is done"))
+}
+
+
+#PLOT LOOP FOR FORAY_IDX2
+#ensure correct order
+load(paste(home_dir, "traj3.RData", sep = "/"))
+tmp <- arrange(traj_idx3, id, date)
+
+#add decimal degrees for the dataset
+nad.83 <- "+proj=longlat +datum=NAD83"
+utm.19 <- ("+proj=utm +zone=19 +north +datum=WGS84")
+tmp2 <- cbind(tmp, spTransform(SpatialPoints(select(tmp, x, y), proj4string = CRS(utm.19)), CRS(nad.83)))
+colnames(tmp2)[c(ncol(tmp2)-1,ncol(tmp2))] <- c("x_dd", "y_dd")
+
+#mark bursts at scale of foray trips
+tmp2$burst <- factor(ifelse(!is.na(tmp2$foray_idx3), paste(tmp2$id, tmp$season, tmp2$foray_idx3, sep = "."), NA))
+
+#anchor color scale in
+colors = brewer.pal(length(unique(tmp2$phase)), "Set1")
+names(colors) <- levels(tmp2$phase)
+colScale <- scale_colour_manual(name = "phase", values = colors)
+
+for(i in 2:length(unique(tmp2$burst))){
+  print(i)
+  #extract data
+  burst_tmp = unique(tmp2$burst)[i]
+  test <- filter(tmp2, burst == burst_tmp)
+  min_date = min(test$date)
+  
+  #plot map
+  map <- get_map(bbox(SpatialPoints(select(test, x_dd, y_dd))), zoom = calc_zoom(make_bbox(x_dd, y_dd, test))-1, source = "google")
+  ggmap(map) + geom_point(data = test, aes(x = x_dd, y = y_dd, colour = phase)) + labs(title = paste(burst_tmp, min_date, sep = "  ")) + guides(fill = TRUE) + colScale
+  ggsave(file = paste(home_dir, "/TripID2/idx3/", unique(test$id), "/", burst_tmp, ".pdf", sep = ""), width = 7, height = 10)
+  
+  print(paste(burst_tmp, "is done"))
+}
+```
